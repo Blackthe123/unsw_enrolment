@@ -1,4 +1,4 @@
 node_modules/
-auth.json/
-test.js/
-./env
+auth.json
+test.js
+.env
