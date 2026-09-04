@@ -1,95 +1,216 @@
+import 'dotenv/config';
 import express from 'express';
 import webpush from 'web-push';
 import { chromium } from 'playwright';
+import Database from 'better-sqlite3';
 import fs from 'node:fs';
-import 'dotenv/config';
 
-const { VAPID_MAILTO, PUBLIC_VAPID_KEY, PRIVATE_VAPID_KEY } = process.env;
+const { 
+  VAPID_MAILTO, 
+  PUBLIC_VAPID_KEY, 
+  PRIVATE_VAPID_KEY, 
+  PORT = 3000 
+} = process.env;
 
-webpush.setVapidDetails(
-  VAPID_MAILTO,
-  PUBLIC_VAPID_KEY,
-  PRIVATE_VAPID_KEY
-);
+if (!VAPID_MAILTO || !PUBLIC_VAPID_KEY || !PRIVATE_VAPID_KEY) {
+  console.error('❌ Missing VAPID configuration in .env file!');
+  process.exit(1);
+}
 
+webpush.setVapidDetails(VAPID_MAILTO, PUBLIC_VAPID_KEY, PRIVATE_VAPID_KEY);
 
+// --- SQLite Database Setup ---
+const db = new Database('watches.db');
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS watches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_code TEXT NOT NULL,
+    class_id TEXT NOT NULL,
+    class_label TEXT,
+    term TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    subscription TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(endpoint, course_code, class_id, term)
+  );
+
+  CREATE TABLE IF NOT EXISTS class_capacities (
+    course_code TEXT NOT NULL,
+    class_id TEXT NOT NULL,
+    term TEXT NOT NULL,
+    component TEXT,
+    enrolled INTEGER,
+    capacity INTEGER,
+    status TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (course_code, class_id, term)
+  );
+`);
+
+// DB Prepared Queries
+const checkExistingAllWatch = db.prepare(`
+  SELECT id FROM watches WHERE endpoint = ? AND course_code = ? AND term = ? AND class_id = 'ALL'
+`);
+
+const deleteSpecificWatches = db.prepare(`
+  DELETE FROM watches WHERE endpoint = ? AND course_code = ? AND term = ? AND class_id != 'ALL'
+`);
+
+const insertWatch = db.prepare(`
+  INSERT OR IGNORE INTO watches (course_code, class_id, class_label, term, endpoint, subscription)
+  VALUES (?, ?, ?, ?, ?, ?)
+`);
+
+const deleteWatch = db.prepare(`
+  DELETE FROM watches WHERE id = ? AND endpoint = ?
+`);
+
+const getUniqueCourses = db.prepare(`
+  SELECT DISTINCT course_code, term FROM watches
+`);
+
+const getSubscribersForClass = db.prepare(`
+  SELECT id, subscription, endpoint FROM watches 
+  WHERE course_code = ? AND term = ? AND (class_id = 'ALL' OR class_id = ?)
+`);
+
+const getWatchesWithCapacities = db.prepare(`
+  SELECT 
+    w.id, 
+    w.course_code, 
+    w.class_id, 
+    w.class_label, 
+    w.term,
+    c.enrolled,
+    c.capacity,
+    c.status
+  FROM watches w
+  LEFT JOIN class_capacities c 
+    ON w.course_code = c.course_code 
+    AND w.term = c.term 
+    AND (w.class_id = c.class_id OR w.class_id = 'ALL')
+  WHERE w.endpoint = ?
+  ORDER BY w.created_at DESC
+`);
+
+const upsertCapacity = db.prepare(`
+  INSERT INTO class_capacities (course_code, class_id, term, component, enrolled, capacity, status, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  ON CONFLICT(course_code, class_id, term) DO UPDATE SET
+    component = excluded.component,
+    enrolled = excluded.enrolled,
+    capacity = excluded.capacity,
+    status = excluded.status,
+    updated_at = CURRENT_TIMESTAMP
+`);
+
+// --- Express App Setup ---
 const app = express();
 app.use(express.json());
 app.use(express.static('public'));
 
-webpush.setVapidDetails(VAPID_MAILTO, PUBLIC_VAPID_KEY, PRIVATE_VAPID_KEY);
-
-// In-memory watch list (or replace with SQLite)
-let activeWatches = [];
-
-app.post('/api/track', (req, res) => {
-  const { courseCode, classId, term, subscription } = req.body;
-  activeWatches.push({ courseCode, classId, term, subscription });
-  console.log(`[Watch Added] ${courseCode} (${classId}) for ${term}`);
-  res.json({ success: true });
+app.get('/api/vapid-public-key', (req, res) => {
+  res.json({ publicKey: PUBLIC_VAPID_KEY });
 });
 
-app.get('/api/watches', (req, res) => {
-  res.json(activeWatches.map(({ courseCode, classId, term }) => ({ courseCode, classId, term })));
+// Smart Track endpoint (Handles ALL vs Specific deduplication)
+app.post('/api/track', (req, res) => {
+  const { courseCode, classId, classLabel, term, subscription } = req.body;
+  const course = courseCode.toUpperCase().trim();
+  const endpoint = subscription.endpoint;
+
+  try {
+    // 1. If user is already tracking ALL for this course, reject specific class addition
+    const hasAll = checkExistingAllWatch.get(endpoint, course, term);
+    if (hasAll && classId !== 'ALL') {
+      return res.json({ success: true, message: `Already tracking ALL classes for ${course}` });
+    }
+
+    // 2. If user selects ALL, remove any individual classes they had previously added
+    if (classId === 'ALL') {
+      deleteSpecificWatches.run(endpoint, course, term);
+    }
+
+    // 3. Insert the watch
+    insertWatch.run(
+      course,
+      classId || 'ALL',
+      classLabel || 'All Classes',
+      term || 'T3',
+      endpoint,
+      JSON.stringify(subscription)
+    );
+
+    console.log(`📌 [Watch Added] ${course} (${classId}) for ${term}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Failed to save watch:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Fetch watches with live capacities for calling device
+app.post('/api/my-watches', (req, res) => {
+  const { endpoint } = req.body;
+  if (!endpoint) return res.json([]);
+  
+  try {
+    const watches = getWatchesWithCapacities.all(endpoint);
+    res.json(watches);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/untrack', (req, res) => {
+  const { id, endpoint } = req.body;
+  try {
+    deleteWatch.run(id, endpoint);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // --- Playwright Polling Worker ---
-// in server.js
-
 async function pollCourses() {
-  if (activeWatches.length === 0) return;
+  const uniqueTargets = getUniqueCourses.all();
+  if (uniqueTargets.length === 0) return;
+
   if (!fs.existsSync('auth.json')) {
     console.error('❌ No auth.json found! Run "node login.js" first.');
     return;
   }
 
-  console.log(`\n🔍 Polling ${activeWatches.length} tracked target(s) on myUNSW...`);
+  console.log(`\n🔍 Checking ${uniqueTargets.length} unique course(s) on myUNSW...`);
 
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ storageState: 'auth.json' });
   const page = await context.newPage();
 
   try {
-    // 1. Open courses page
     await page.goto('https://my.unsw.edu.au/active/studentClassEnrol/courses.xml', { waitUntil: 'domcontentloaded' });
 
-    // 2. CHECK IF SESSION EXPIRED / REDIRECTED TO SSO
-    if (page.url().includes('login.microsoftonline.com') || page.url().includes('login.')) {
+    if (page.url().includes('login.microsoftonline.com') || page.url().includes('/login')) {
       console.error('🚨 [AUTH EXPIRED] Your session in auth.json has expired!');
-      console.error('👉 Please open a terminal and run: node login.js');
       return;
     }
 
-    // Quick verification that the course enrolment title is visible (timeout 8s instead of 30s)
-    try {
-      await page.waitForSelector('h3.un-page-title:has-text("Course Enrolment")', { timeout: 8000 });
-    } catch {
-      console.error('🚨 [AUTH ERROR] Could not reach Course Enrolment page. Run: node login.js');
-      return;
-    }
+    for (const target of uniqueTargets) {
+      const { course_code: course, term } = target;
 
-    // 3. Group targets by course and term
-    const uniqueCourses = [...new Set(activeWatches.map(w => ({ course: w.courseCode, term: w.term })))];
-
-    for (const item of uniqueCourses) {
-      const { course, term } = item;
-
-      // Ensure we are on the main courses page
       if (!page.url().endsWith('courses.xml')) {
         await page.goto('https://my.unsw.edu.au/active/studentClassEnrol/courses.xml');
       }
 
-      // Switch to the requested Term tab (e.g. "Term 3 2026")
       const termTabButton = page.locator(`ul.nav-tabs a:has-text("${term}")`).first();
       if (await termTabButton.count() > 0) {
         await termTabButton.click();
-        await page.waitForTimeout(500); // brief pause for tab fade animation
+        await page.waitForTimeout(400);
       }
 
       const activeTab = page.locator('div.tab-pane.show.active');
-
-      // Check if course is already in the list
       const courseRow = activeTab.locator(`table.table tbody tr:has-text("${course}")`).first();
       const isAlreadyInList = (await courseRow.count()) > 0;
 
@@ -109,7 +230,6 @@ async function pollCourses() {
 
       await page.waitForSelector('h3.un-page-title:has-text("Course Information")');
 
-      // 4. Parse the Class Sections Table
       const rows = page.locator('section.un-page-section table.table tbody tr');
       const count = await rows.count();
 
@@ -119,35 +239,35 @@ async function pollCourses() {
 
         const classNbr = (await cells.nth(0).innerText()).trim();
         const component = (await cells.nth(2).innerText()).trim();
-        const capacityText = (await cells.nth(9).innerText()).trim(); // "227 / 260"
+        const capacityText = (await cells.nth(9).innerText()).trim(); // e.g. "227 / 260"
+        const status = (await cells.nth(10).innerText()).trim();      // "Open" / "Closed"
         const [enrolled, max] = capacityText.split('/').map(n => parseInt(n.trim(), 10));
 
-        // Check if there is an open spot
+        // Always save latest live capacity to DB for the UI to display
+        upsertCapacity.run(course, classNbr, term, component, enrolled, max, status);
+
+        // If open spot detected, notify subscribers
         if (enrolled < max) {
           console.log(`🎉 SPOT OPEN: ${course} Class #${classNbr} [${component}] (${enrolled}/${max})`);
 
-          // Find users subscribed to this class or "ALL"
-          const matchingSubs = activeWatches.filter(
-            w => w.courseCode === course && (w.classId === 'ALL' || w.classId === classNbr)
-          );
+          const subscribers = getSubscribersForClass.all(course, term, classNbr);
 
-          for (const sub of matchingSubs) {
+          for (const sub of subscribers) {
+            const pushSub = JSON.parse(sub.subscription);
+            
             const payload = JSON.stringify({
               title: `Spot Available in ${course}!`,
-              body: `Class #${classNbr} [${component}] has open spots (${enrolled}/${max}). Click to enrol!`,
+              body: `Class #${classNbr} [${component}] has seats open (${enrolled}/${max}). Tap to enrol!`,
               url: 'https://my.unsw.edu.au'
             });
 
-            webpush.sendNotification(sub.subscription, payload)
-            .then(response => {
-                console.log(`✅ Push successfully delivered to push server! Status: ${response.statusCode}`);
-            })
-            .catch(err => {
-                console.error(`❌ WebPush Error (${err.statusCode}):`, err.body || err.message);
+            webpush.sendNotification(pushSub, payload)
+              .then(() => console.log(`🚀 [Push Sent] Alerted subscriber for ${course} #${classNbr}`))
+              .catch(err => {
                 if (err.statusCode === 410 || err.statusCode === 404) {
-                activeWatches = activeWatches.filter(w => w !== sub);
+                  deleteWatch.run(sub.id, sub.endpoint);
                 }
-            });
+              });
           }
         }
       }
@@ -159,8 +279,7 @@ async function pollCourses() {
   }
 }
 
-// Start polling every 2 minutes
 setInterval(pollCourses, 120000);
+setTimeout(pollCourses, 5000);
 
-const PORT = 3000;
 app.listen(PORT, () => console.log(`🚀 PWA Server running at http://localhost:${PORT}`));

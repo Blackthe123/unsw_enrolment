@@ -1,5 +1,4 @@
 const GRAPHQL_URL = 'https://graphql.devsoc.app/v1/graphql';
-const PUBLIC_VAPID_KEY = 'BE4-5123OzzVZGnXY_ZuR4PtD6uQ8NEcY44QsWo0uw0snnqCD02RcSavnK5gQmwHByIfXoLYl39FebAVB6IvcNA';
 
 const termSelect = document.getElementById('termSelect');
 const courseInput = document.getElementById('courseInput');
@@ -7,26 +6,34 @@ const courseList = document.getElementById('courseList');
 const classSelect = document.getElementById('classSelect');
 const trackBtn = document.getElementById('trackBtn');
 const statusMsg = document.getElementById('statusMsg');
+const activeWatchesList = document.getElementById('activeWatches');
 
-// 1. Fetch all course codes on load for Autocomplete
+let currentSubscription = null;
+
+// 1. Fetch Course Autocomplete List from DevSoc
 async function loadCourseCodes() {
   const query = `query { courses { course_code } }`;
-  const res = await fetch(GRAPHQL_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query })
-  });
-  const data = await res.json();
-  
-  courseList.innerHTML = '';
-  data.data.courses.forEach(c => {
-    const opt = document.createElement('option');
-    opt.value = c.course_code;
-    courseList.appendChild(opt);
-  });
+  try {
+    const res = await fetch(GRAPHQL_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query })
+    });
+    const result = await res.json();
+    const courses = result.data?.courses || [];
+
+    courseList.innerHTML = '';
+    courses.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.course_code;
+      courseList.appendChild(opt);
+    });
+  } catch (err) {
+    console.error('Failed to load courses:', err);
+  }
 }
 
-// 2. Fetch specific classes when course & term are chosen
+// 2. Fetch specific classes with Times/Days/Locations
 async function loadClassesForCourse(courseCode, term) {
   classSelect.innerHTML = '<option value="">⏳ Loading class times...</option>';
   classSelect.disabled = true;
@@ -35,12 +42,10 @@ async function loadClassesForCourse(courseCode, term) {
     query GetClasses($coursePattern: String!, $term: String!) {
       classes(where: { term: { _eq: $term }, course_id: { _ilike: $coursePattern } }) {
         class_id
-        course_id
         times {
           day
           time
           location
-          instructor
         }
       }
     }
@@ -62,43 +67,36 @@ async function loadClassesForCourse(courseCode, term) {
     const { data } = await res.json();
     const classes = data?.classes || [];
 
-    // Reset dropdown
-    classSelect.innerHTML = '<option value="ALL">🌟 Track ALL Classes in this Course</option>';
+    classSelect.innerHTML = '<option value="ALL" data-label="All Classes">🌟 Track ALL Classes in this Course</option>';
 
     if (classes.length > 0) {
       classes.forEach(c => {
-        // 1. Extract the actual 4-digit class number from the end of class_id
-        // e.g. "GEOS1111-Undergraduate-2026-T3-6161" -> "6161"
         const classNbr = c.class_id.split('-').pop();
-
-        // 2. Build a rich description (Day, Time, Instructor, Location)
         let label = `Class #${classNbr}`;
 
         if (c.times && c.times.length > 0) {
-          const t = c.times[0]; // Primary time slot
+          const t = c.times[0];
           const dayTime = t.day && t.time ? `[${t.day} ${t.time}]` : '';
           const location = t.location ? `📍 ${t.location}` : '';
-          const instructor = t.instructor ? `👤 ${t.instructor}` : '';
-
-          label = `Class #${classNbr} ${dayTime} ${location} ${instructor}`.trim();
+          label = `Class #${classNbr} ${dayTime} ${location}`.trim();
         } else {
-          label = `Class #${classNbr} (Online / Flexible / TBA)`;
+          label = `Class #${classNbr} (Online / TBA)`;
         }
 
         const opt = document.createElement('option');
-        opt.value = classNbr; // Send just "6161" to backend for Playwright matching
+        opt.value = classNbr;
+        opt.dataset.label = label;
         opt.textContent = label;
         classSelect.appendChild(opt);
       });
-
       classSelect.disabled = false;
     } else {
-      classSelect.innerHTML = '<option value="ALL">No specific times found (Track All)</option>';
+      classSelect.innerHTML = '<option value="ALL" data-label="All Classes">Track All Classes (No specific sections found)</option>';
       classSelect.disabled = false;
     }
   } catch (err) {
-    console.error('Error fetching classes:', err);
-    classSelect.innerHTML = '<option value="ALL">Track All Classes (Error loading times)</option>';
+    console.error(err);
+    classSelect.innerHTML = '<option value="ALL" data-label="All Classes">Track All Classes</option>';
     classSelect.disabled = false;
   }
 }
@@ -108,19 +106,22 @@ courseInput.addEventListener('change', (e) => {
     loadClassesForCourse(e.target.value, termSelect.value);
   }
 });
+
 termSelect.addEventListener('change', () => {
   if (courseInput.value.length >= 8) {
     loadClassesForCourse(courseInput.value, termSelect.value);
   }
 });
 
-// 3. Register Service Worker & Subscribe to Web Push
+// 3. Track Button Click
 trackBtn.addEventListener('click', async () => {
   const courseCode = courseInput.value.trim().toUpperCase();
-  const classId = classSelect.value;
+  const classId = classSelect.value || 'ALL';
+  const selectedOpt = classSelect.options[classSelect.selectedIndex];
+  const classLabel = selectedOpt ? selectedOpt.dataset.label || selectedOpt.textContent : 'All Classes';
   const term = termSelect.value;
 
-  if (!courseCode) return alert('Please enter a course code.');
+  if (!courseCode) return alert('Please enter a course code (e.g. COMP1511).');
 
   statusMsg.textContent = 'Requesting push permission...';
 
@@ -129,38 +130,103 @@ trackBtn.addEventListener('click', async () => {
     const perm = await Notification.requestPermission();
     
     if (perm !== 'granted') {
-      statusMsg.textContent = '❌ Push notification permission denied.';
+      statusMsg.textContent = '❌ Push permission denied.';
       return;
     }
 
-    const sub = await reg.pushManager.subscribe({
+    const { publicKey } = await fetch('/api/vapid-public-key').then(r => r.json());
+
+    currentSubscription = await reg.pushManager.subscribe({
       userVisibleOnly: true,
-      applicationServerKey: PUBLIC_VAPID_KEY
+      applicationServerKey: publicKey
     });
 
-    // Send tracking target to Backend Server
     const res = await fetch('/api/track', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ courseCode, classId, term, subscription: sub })
+      body: JSON.stringify({
+        courseCode,
+        classId,
+        classLabel,
+        term,
+        subscription: currentSubscription
+      })
     });
 
-    if (res.ok) {
-      statusMsg.textContent = `✅ Tracking ${courseCode} (${classId})! You will get a push alert when a spot opens.`;
-      loadActiveWatches();
+    const data = await res.json();
+    if (data.success) {
+      statusMsg.textContent = data.message || `✅ Tracking ${courseCode}!`;
+      loadMyWatches();
     }
   } catch (err) {
     statusMsg.textContent = `Error: ${err.message}`;
   }
 });
 
-async function loadActiveWatches() {
-  const res = await fetch('/api/watches');
+// 4. Load Active Watches with Live Capacities
+async function loadMyWatches() {
+  const reg = await navigator.serviceWorker.getRegistration();
+  if (!reg) return;
+
+  const sub = await reg.pushManager.getSubscription();
+  if (!sub) {
+    activeWatchesList.innerHTML = '<li class="muted-text">No active watches on this browser.</li>';
+    return;
+  }
+
+  currentSubscription = sub;
+
+  const res = await fetch('/api/my-watches', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ endpoint: sub.endpoint })
+  });
+
   const data = await res.json();
-  const list = document.getElementById('activeWatches');
-  list.innerHTML = data.map(w => `<li><span>${w.courseCode} (${w.classId})</span> <b>${w.term}</b></li>`).join('');
+  
+  if (!data || data.length === 0) {
+    activeWatchesList.innerHTML = '<li class="muted-text">No active watches.</li>';
+    return;
+  }
+
+  activeWatchesList.innerHTML = data.map(w => {
+    // Determine capacity badge status
+    let capacityBadge = `<span class="capacity-pill syncing">⏳ Syncing...</span>`;
+    if (w.enrolled !== null && w.capacity !== null) {
+      const isOpen = w.enrolled < w.capacity;
+      const badgeClass = isOpen ? 'open' : 'full';
+      capacityBadge = `<span class="capacity-pill ${badgeClass}">${w.enrolled} / ${w.capacity} (${isOpen ? 'Open' : 'Full'})</span>`;
+    }
+
+    return `
+      <li>
+        <div class="watch-info">
+          <div class="watch-header">
+            <b>${w.course_code}</b>
+            <span class="badge">${w.term}</span>
+          </div>
+          <div class="watch-details">${w.class_label || 'All Classes'}</div>
+          <div class="watch-capacity">${capacityBadge}</div>
+        </div>
+        <button class="delete-btn" onclick="removeWatch(${w.id})">✕</button>
+      </li>
+    `;
+  }).join('');
 }
+
+// 5. Remove Watch
+window.removeWatch = async function(id) {
+  if (!currentSubscription) return;
+
+  await fetch('/api/untrack', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, endpoint: currentSubscription.endpoint })
+  });
+
+  loadMyWatches();
+};
 
 // Initial calls
 loadCourseCodes();
-loadActiveWatches();
+loadMyWatches();

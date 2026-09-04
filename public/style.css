@@ -4,6 +4,8 @@
   --primary: #fbbf24;
   --text: #f8fafc;
   --muted: #94a3b8;
+  --danger: #ef4444;
+  --success: #10b981;
 }
 
 body {
@@ -52,15 +54,46 @@ input, select {
   cursor: pointer;
   background: var(--primary);
   color: #000;
+  transition: opacity 0.2s;
 }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn:hover { opacity: 0.9; }
 
 .status { margin-top: 12px; font-size: 0.875rem; text-align: center; }
+.badge { color: var(--primary); font-weight: bold; margin-left: 6px; }
+.muted-text { color: var(--muted); font-size: 0.875rem; }
+
 .tracking-list ul { list-style: none; padding: 0; margin: 0; }
 .tracking-list li {
-  padding: 10px;
+  padding: 12px 0;
   border-bottom: 1px solid #334155;
   display: flex;
   justify-content: space-between;
-  font-size: 0.9rem;
+  align-items: center;
 }
+
+.watch-info { display: flex; flex-direction: column; gap: 4px; }
+.watch-header { font-size: 1rem; }
+.watch-details { font-size: 0.825rem; color: var(--muted); }
+.watch-capacity { margin-top: 2px; }
+
+.capacity-pill {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 9999px;
+}
+.capacity-pill.open { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+.capacity-pill.full { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+.capacity-pill.syncing { background: rgba(148, 163, 184, 0.2); color: var(--muted); }
+
+.delete-btn {
+  background: transparent;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 4px 10px;
+  font-weight: bold;
+}
+.delete-btn:hover { background: var(--danger); color: #fff; }
