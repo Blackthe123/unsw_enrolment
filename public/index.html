@@ -8,46 +8,76 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <div class="container">
-    <header>
-      <h1>🎯 UNSW Class Tracker</h1>
-      <p>Real-time push alerts when spots open in myUNSW</p>
-    </header>
+  <div class="layout">
+    <!-- Main Tracker Column -->
+    <div class="main-content">
+      <header>
+        <h1>🎯 UNSW Class Tracker</h1>
+        <p>Real-time push alerts when spots open in myUNSW</p>
+      </header>
 
-    <main class="card">
-      <!-- Term Selector -->
-      <div class="form-group">
-        <label for="termSelect">Term</label>
-        <select id="termSelect">
-          <option value="T1">Term 1</option>
-          <option value="T2">Term 2</option>
-          <option value="T3" selected>Term 3</option>
-        </select>
+      <main class="card">
+        <!-- Term Selector -->
+        <div class="form-group">
+          <label for="termSelect">Term</label>
+          <select id="termSelect">
+            <option value="T1">Term 1</option>
+            <option value="T2">Term 2</option>
+            <option value="T3" selected>Term 3</option>
+          </select>
+        </div>
+
+        <!-- Course Autocomplete -->
+        <div class="form-group">
+          <label for="courseInput">Course Code</label>
+          <input type="text" id="courseInput" list="courseList" placeholder="e.g. COMP1511 or ECON1101" autocomplete="off" maxlength="8">
+          <datalist id="courseList"></datalist>
+          <small id="courseValidationMsg" class="helper-text"></small>
+        </div>
+
+        <!-- Dynamic Class Selection -->
+        <div class="form-group">
+          <label for="classSelect">Class Component</label>
+          <select id="classSelect" disabled>
+            <option value="">Select a course first...</option>
+          </select>
+        </div>
+
+        <button id="trackBtn" class="btn primary">🔔 Track & Enable Alerts</button>
+        <div id="statusMsg" class="status"></div>
+      </main>
+
+      <section class="card tracking-list">
+        <h3>Active Watches</h3>
+        <ul id="activeWatches"></ul>
+      </section>
+    </div>
+
+    <!-- Info & Instructions Sidebar -->
+    <aside class="sidebar">
+      <div class="card info-card">
+        <h3>📱 How it Works</h3>
+        <p>Our server polls the live myUNSW database <b>every 2 minutes</b>. As soon as someone drops a class, you get an instant lock-screen alert.</p>
+        
+        <hr class="divider">
+
+        <h4>🍎 iPhone / iPad Setup</h4>
+        <ol class="guide-list">
+          <li>Open this site in <b>Safari</b>.</li>
+          <li>Tap the <b>Share icon (⎋)</b> at the bottom.</li>
+          <li>Select <b>"Add to Home Screen"</b>.</li>
+          <li>Open the installed app icon from your home screen and hit <b>Track</b> to allow notifications.</li>
+        </ol>
+
+        <hr class="divider">
+
+        <h4>⚡ Features</h4>
+        <ul class="guide-list">
+          <li><b>No Sign-Up:</b> Zero passwords or accounts required.</li>
+          <li><b>Closed App Alerts:</b> You do not need to keep this tab open; your phone screen will light up when a spot opens.</li>
+        </ul>
       </div>
-
-      <!-- Course Autocomplete -->
-      <div class="form-group">
-        <label for="courseInput">Course Code</label>
-        <input type="text" id="courseInput" list="courseList" placeholder="e.g. COMP1511 or ECON1101" autocomplete="off">
-        <datalist id="courseList"></datalist>
-      </div>
-
-      <!-- Dynamic Class Selection (populated via DevSoc GraphQL) -->
-      <div class="form-group">
-        <label for="classSelect">Class Component</label>
-        <select id="classSelect" disabled>
-          <option value="">Select a course first...</option>
-        </select>
-      </div>
-
-      <button id="trackBtn" class="btn primary">🔔 Track & Enable Alerts</button>
-      <div id="statusMsg" class="status"></div>
-    </main>
-
-    <section class="card tracking-list">
-      <h3>Active Watches</h3>
-      <ul id="activeWatches"></ul>
-    </section>
+    </aside>
   </div>
 
   <script src="/app.js"></script>

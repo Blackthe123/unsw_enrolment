@@ -75,13 +75,16 @@ const getSubscribersForClass = db.prepare(`
   WHERE course_code = ? AND term = ? AND (class_id = 'ALL' OR class_id = ?)
 `);
 
+// in server.js
 const getWatchesWithCapacities = db.prepare(`
   SELECT 
-    w.id, 
+    w.id AS watch_id, 
     w.course_code, 
-    w.class_id, 
+    w.class_id AS watched_class_id, 
     w.class_label, 
     w.term,
+    c.class_id AS actual_class_id,
+    c.component,
     c.enrolled,
     c.capacity,
     c.status
@@ -91,7 +94,7 @@ const getWatchesWithCapacities = db.prepare(`
     AND w.term = c.term 
     AND (w.class_id = c.class_id OR w.class_id = 'ALL')
   WHERE w.endpoint = ?
-  ORDER BY w.created_at DESC
+  ORDER BY w.created_at DESC, c.class_id ASC
 `);
 
 const upsertCapacity = db.prepare(`
@@ -173,7 +176,11 @@ app.post('/api/untrack', (req, res) => {
   }
 });
 
-// --- Playwright Polling Worker ---
+const getPreviousClassState = db.prepare(`
+  SELECT enrolled, capacity, status FROM class_capacities 
+  WHERE course_code = ? AND class_id = ? AND term = ?
+`);
+
 async function pollCourses() {
   const uniqueTargets = getUniqueCourses.all();
   if (uniqueTargets.length === 0) return;
@@ -204,6 +211,7 @@ async function pollCourses() {
         await page.goto('https://my.unsw.edu.au/active/studentClassEnrol/courses.xml');
       }
 
+      // 1. Switch to Term Tab
       const termTabButton = page.locator(`ul.nav-tabs a:has-text("${term}")`).first();
       if (await termTabButton.count() > 0) {
         await termTabButton.click();
@@ -230,6 +238,24 @@ async function pollCourses() {
 
       await page.waitForSelector('h3.un-page-title:has-text("Course Information")');
 
+      // 2. CHECK OVERALL COURSE CAPACITY FIRST (The Gatekeeper)
+      let isOverallCourseOpen = true;
+      try {
+        const overallCapElem = page.locator('dl dt:has-text("Enrols / Capacity") + dd').first();
+        const overallText = (await overallCapElem.innerText()).trim(); // e.g. "167 / 168"
+        const [cEnrolled, cMax] = overallText.split('/').map(n => parseInt(n.trim(), 10));
+
+        console.log(`📊 Overall ${course} Capacity: ${cEnrolled} / ${cMax}`);
+        
+        if (cEnrolled >= cMax) {
+          isOverallCourseOpen = false;
+          console.log(`⛔ ${course} is FULL overall (${cEnrolled}/${cMax}). Class alerts suppressed.`);
+        }
+      } catch (err) {
+        console.warn('Could not parse overall course capacity, checking classes directly...');
+      }
+
+      // 3. Parse Individual Class Rows
       const rows = page.locator('section.un-page-section table.table tbody tr');
       const count = await rows.count();
 
@@ -239,16 +265,26 @@ async function pollCourses() {
 
         const classNbr = (await cells.nth(0).innerText()).trim();
         const component = (await cells.nth(2).innerText()).trim();
-        const capacityText = (await cells.nth(9).innerText()).trim(); // e.g. "227 / 260"
+        const capacityText = (await cells.nth(9).innerText()).trim(); // "227 / 260"
         const status = (await cells.nth(10).innerText()).trim();      // "Open" / "Closed"
         const [enrolled, max] = capacityText.split('/').map(n => parseInt(n.trim(), 10));
 
-        // Always save latest live capacity to DB for the UI to display
+        // Check previous recorded state from DB to prevent spamming
+        const prevState = getPreviousClassState.get(course, classNbr, term);
+        const wasFullOrClosed = !prevState || prevState.enrolled >= prevState.capacity || prevState.status === 'Closed';
+        const moreSpotsOpened = prevState && enrolled < prevState.enrolled;
+
+        // Save current numbers to database so the PWA UI is always up to date
         upsertCapacity.run(course, classNbr, term, component, enrolled, max, status);
 
-        // If open spot detected, notify subscribers
-        if (enrolled < max) {
-          console.log(`🎉 SPOT OPEN: ${course} Class #${classNbr} [${component}] (${enrolled}/${max})`);
+        // Send alert ONLY IF:
+        // 1. Overall course has spots (isOverallCourseOpen === true)
+        // 2. This specific class has spots (enrolled < max)
+        // 3. State changed (it was previously full, or more spots opened)
+        const shouldNotify = isOverallCourseOpen && (enrolled < max) && (wasFullOrClosed || moreSpotsOpened);
+
+        if (shouldNotify) {
+          console.log(`🎉 NEW SPOT OPEN: ${course} Class #${classNbr} [${component}] (${enrolled}/${max})`);
 
           const subscribers = getSubscribersForClass.all(course, term, classNbr);
 
@@ -257,7 +293,7 @@ async function pollCourses() {
             
             const payload = JSON.stringify({
               title: `Spot Available in ${course}!`,
-              body: `Class #${classNbr} [${component}] has seats open (${enrolled}/${max}). Tap to enrol!`,
+              body: `Class #${classNbr} [${component}] now has open seats (${enrolled}/${max}). Tap to enrol!`,
               url: 'https://my.unsw.edu.au'
             });
 
@@ -273,7 +309,7 @@ async function pollCourses() {
       }
     }
   } catch (error) {
-    console.error('Scraper error:', error.message);
+    console.error('Scraper error during poll:', error.message);
   } finally {
     await browser.close();
   }

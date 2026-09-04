@@ -7,10 +7,12 @@ const classSelect = document.getElementById('classSelect');
 const trackBtn = document.getElementById('trackBtn');
 const statusMsg = document.getElementById('statusMsg');
 const activeWatchesList = document.getElementById('activeWatches');
+const courseValidationMsg = document.getElementById('courseValidationMsg');
 
 let currentSubscription = null;
+let validCourseCodes = new Set();
 
-// 1. Fetch Course Autocomplete List from DevSoc
+// 1. Fetch & Cache Valid Course Codes
 async function loadCourseCodes() {
   const query = `query { courses { course_code } }`;
   try {
@@ -24,17 +26,35 @@ async function loadCourseCodes() {
 
     courseList.innerHTML = '';
     courses.forEach(c => {
+      const code = c.course_code.toUpperCase();
+      validCourseCodes.add(code);
+
       const opt = document.createElement('option');
-      opt.value = c.course_code;
+      opt.value = code;
       courseList.appendChild(opt);
     });
+    console.log(`✅ Cached ${validCourseCodes.size} valid course codes.`);
   } catch (err) {
-    console.error('Failed to load courses:', err);
+    console.error('Failed to load courses from DevSoc:', err);
   }
 }
 
 // 2. Fetch specific classes with Times/Days/Locations
 async function loadClassesForCourse(courseCode, term) {
+  courseCode = courseCode.trim().toUpperCase();
+
+  // Validate course code exists
+  if (validCourseCodes.size > 0 && !validCourseCodes.has(courseCode)) {
+    courseValidationMsg.textContent = '❌ Course code not found in UNSW catalog.';
+    courseValidationMsg.style.color = '#ef4444';
+    classSelect.innerHTML = '<option value="">Invalid course code</option>';
+    classSelect.disabled = true;
+    return;
+  } else {
+    courseValidationMsg.textContent = '✅ Valid UNSW Course';
+    courseValidationMsg.style.color = '#10b981';
+  }
+
   classSelect.innerHTML = '<option value="">⏳ Loading class times...</option>';
   classSelect.disabled = true;
 
@@ -58,7 +78,7 @@ async function loadClassesForCourse(courseCode, term) {
       body: JSON.stringify({
         query,
         variables: {
-          coursePattern: `%${courseCode.trim().toUpperCase()}%`,
+          coursePattern: `%${courseCode}%`,
           term: term
         }
       })
@@ -91,7 +111,7 @@ async function loadClassesForCourse(courseCode, term) {
       });
       classSelect.disabled = false;
     } else {
-      classSelect.innerHTML = '<option value="ALL" data-label="All Classes">Track All Classes (No specific sections found)</option>';
+      classSelect.innerHTML = '<option value="ALL" data-label="All Classes">Track All Classes (No individual sections)</option>';
       classSelect.disabled = false;
     }
   } catch (err) {
@@ -101,14 +121,14 @@ async function loadClassesForCourse(courseCode, term) {
   }
 }
 
-courseInput.addEventListener('change', (e) => {
-  if (e.target.value.length >= 8) {
+courseInput.addEventListener('input', (e) => {
+  if (e.target.value.length === 8) {
     loadClassesForCourse(e.target.value, termSelect.value);
   }
 });
 
 termSelect.addEventListener('change', () => {
-  if (courseInput.value.length >= 8) {
+  if (courseInput.value.length === 8) {
     loadClassesForCourse(courseInput.value, termSelect.value);
   }
 });
@@ -121,7 +141,11 @@ trackBtn.addEventListener('click', async () => {
   const classLabel = selectedOpt ? selectedOpt.dataset.label || selectedOpt.textContent : 'All Classes';
   const term = termSelect.value;
 
-  if (!courseCode) return alert('Please enter a course code (e.g. COMP1511).');
+  // Validation
+  if (!courseCode || (validCourseCodes.size > 0 && !validCourseCodes.has(courseCode))) {
+    alert('Please enter a valid 8-character UNSW course code (e.g. COMP1511).');
+    return;
+  }
 
   statusMsg.textContent = 'Requesting push permission...';
 
@@ -130,7 +154,7 @@ trackBtn.addEventListener('click', async () => {
     const perm = await Notification.requestPermission();
     
     if (perm !== 'granted') {
-      statusMsg.textContent = '❌ Push permission denied.';
+      statusMsg.textContent = '❌ Push permission denied in browser settings.';
       return;
     }
 
@@ -163,7 +187,7 @@ trackBtn.addEventListener('click', async () => {
   }
 });
 
-// 4. Load Active Watches with Live Capacities
+// 4. Load Active Watches with Clean Sub-Class Display
 async function loadMyWatches() {
   const reg = await navigator.serviceWorker.getRegistration();
   if (!reg) return;
@@ -190,25 +214,33 @@ async function loadMyWatches() {
   }
 
   activeWatchesList.innerHTML = data.map(w => {
-    // Determine capacity badge status
-    let capacityBadge = `<span class="capacity-pill syncing">⏳ Syncing...</span>`;
+    let capacityBadge = `<span class="capacity-pill syncing">⏳ Syncing with myUNSW...</span>`;
+    
     if (w.enrolled !== null && w.capacity !== null) {
       const isOpen = w.enrolled < w.capacity;
       const badgeClass = isOpen ? 'open' : 'full';
       capacityBadge = `<span class="capacity-pill ${badgeClass}">${w.enrolled} / ${w.capacity} (${isOpen ? 'Open' : 'Full'})</span>`;
     }
 
+    // Format display label cleanly whether single class or "ALL"
+    let displayTitle = `<b>${w.course_code}</b>`;
+    let displayDetail = w.class_label;
+
+    if (w.watched_class_id === 'ALL' && w.actual_class_id) {
+      displayDetail = `Class #${w.actual_class_id} [${w.component || 'Section'}]`;
+    }
+
     return `
       <li>
         <div class="watch-info">
           <div class="watch-header">
-            <b>${w.course_code}</b>
+            ${displayTitle}
             <span class="badge">${w.term}</span>
           </div>
-          <div class="watch-details">${w.class_label || 'All Classes'}</div>
+          <div class="watch-details">${displayDetail}</div>
           <div class="watch-capacity">${capacityBadge}</div>
         </div>
-        <button class="delete-btn" onclick="removeWatch(${w.id})">✕</button>
+        <button class="delete-btn" onclick="removeWatch(${w.watch_id})">✕</button>
       </li>
     `;
   }).join('');
@@ -227,6 +259,6 @@ window.removeWatch = async function(id) {
   loadMyWatches();
 };
 
-// Initial calls
+// Initial setup
 loadCourseCodes();
 loadMyWatches();
