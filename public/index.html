@@ -17,7 +17,6 @@
       </header>
 
       <main class="card">
-        <!-- Term Selector -->
         <div class="form-group">
           <label for="termSelect">Term</label>
           <select id="termSelect">
@@ -27,7 +26,6 @@
           </select>
         </div>
 
-        <!-- Course Autocomplete -->
         <div class="form-group">
           <label for="courseInput">Course Code</label>
           <input type="text" id="courseInput" list="courseList" placeholder="e.g. COMP1511 or ECON1101" autocomplete="off" maxlength="8">
@@ -35,7 +33,6 @@
           <small id="courseValidationMsg" class="helper-text"></small>
         </div>
 
-        <!-- Dynamic Class Selection -->
         <div class="form-group">
           <label for="classSelect">Class Component</label>
           <select id="classSelect" disabled>
@@ -47,17 +44,30 @@
         <div id="statusMsg" class="status"></div>
       </main>
 
+      <!-- Active Watches Card -->
       <section class="card tracking-list">
         <h3>Active Watches</h3>
-        <ul id="activeWatches"></ul>
+        <ul id="activeWatches">
+          <li class="muted-text">Loading active watches...</li>
+        </ul>
       </section>
     </div>
 
-    <!-- Info & Instructions Sidebar -->
+    <!-- Sidebar Info & Course-Level Ceilings -->
     <aside class="sidebar">
+      <!-- Live Overall Course Capacities Card -->
+      <div class="card course-overview-card">
+        <h3>📊 Overall Course Capacities</h3>
+        <p class="card-subtitle">Course-level ceiling must be open for class enrolment to succeed.</p>
+        <ul id="courseOverviewList" class="course-overview-list">
+          <li class="muted-text">Track a course to view overall capacity.</li>
+        </ul>
+      </div>
+
+      <!-- Instructions & iOS Guide -->
       <div class="card info-card">
         <h3>📱 How it Works</h3>
-        <p>Our server polls the live myUNSW database <b>every 2 minutes</b>. As soon as someone drops a class, you get an instant lock-screen alert.</p>
+        <p>Our server polls the live myUNSW database <b>every 2 minutes</b>. If someone drops a course or tutorial, you get an instant lock-screen alert.</p>
         
         <hr class="divider">
 
@@ -66,16 +76,8 @@
           <li>Open this site in <b>Safari</b>.</li>
           <li>Tap the <b>Share icon (⎋)</b> at the bottom.</li>
           <li>Select <b>"Add to Home Screen"</b>.</li>
-          <li>Open the installed app icon from your home screen and hit <b>Track</b> to allow notifications.</li>
+          <li>Open the installed app and hit <b>Track</b> to enable push.</li>
         </ol>
-
-        <hr class="divider">
-
-        <h4>⚡ Features</h4>
-        <ul class="guide-list">
-          <li><b>No Sign-Up:</b> Zero passwords or accounts required.</li>
-          <li><b>Closed App Alerts:</b> You do not need to keep this tab open; your phone screen will light up when a spot opens.</li>
-        </ul>
       </div>
     </aside>
   </div>

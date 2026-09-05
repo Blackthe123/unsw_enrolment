@@ -7,6 +7,7 @@ const classSelect = document.getElementById('classSelect');
 const trackBtn = document.getElementById('trackBtn');
 const statusMsg = document.getElementById('statusMsg');
 const activeWatchesList = document.getElementById('activeWatches');
+const courseOverviewList = document.getElementById('courseOverviewList');
 const courseValidationMsg = document.getElementById('courseValidationMsg');
 
 let currentSubscription = null;
@@ -24,16 +25,17 @@ async function loadCourseCodes() {
     const result = await res.json();
     const courses = result.data?.courses || [];
 
-    courseList.innerHTML = '';
-    courses.forEach(c => {
-      const code = c.course_code.toUpperCase();
-      validCourseCodes.add(code);
+    if (courseList) {
+      courseList.innerHTML = '';
+      courses.forEach(c => {
+        const code = c.course_code.toUpperCase();
+        validCourseCodes.add(code);
 
-      const opt = document.createElement('option');
-      opt.value = code;
-      courseList.appendChild(opt);
-    });
-    console.log(`✅ Cached ${validCourseCodes.size} valid course codes.`);
+        const opt = document.createElement('option');
+        opt.value = code;
+        courseList.appendChild(opt);
+      });
+    }
   } catch (err) {
     console.error('Failed to load courses from DevSoc:', err);
   }
@@ -43,14 +45,15 @@ async function loadCourseCodes() {
 async function loadClassesForCourse(courseCode, term) {
   courseCode = courseCode.trim().toUpperCase();
 
-  // Validate course code exists
   if (validCourseCodes.size > 0 && !validCourseCodes.has(courseCode)) {
-    courseValidationMsg.textContent = '❌ Course code not found in UNSW catalog.';
-    courseValidationMsg.style.color = '#ef4444';
+    if (courseValidationMsg) {
+      courseValidationMsg.textContent = '❌ Course code not found in UNSW catalog.';
+      courseValidationMsg.style.color = '#ef4444';
+    }
     classSelect.innerHTML = '<option value="">Invalid course code</option>';
     classSelect.disabled = true;
     return;
-  } else {
+  } else if (courseValidationMsg) {
     courseValidationMsg.textContent = '✅ Valid UNSW Course';
     courseValidationMsg.style.color = '#10b981';
   }
@@ -121,129 +124,164 @@ async function loadClassesForCourse(courseCode, term) {
   }
 }
 
-courseInput.addEventListener('input', (e) => {
-  if (e.target.value.length === 8) {
-    loadClassesForCourse(e.target.value, termSelect.value);
-  }
-});
+if (courseInput) {
+  courseInput.addEventListener('input', (e) => {
+    if (e.target.value.length === 8) {
+      loadClassesForCourse(e.target.value, termSelect.value);
+    }
+  });
+}
 
-termSelect.addEventListener('change', () => {
-  if (courseInput.value.length === 8) {
-    loadClassesForCourse(courseInput.value, termSelect.value);
-  }
-});
+if (termSelect) {
+  termSelect.addEventListener('change', () => {
+    if (courseInput && courseInput.value.length === 8) {
+      loadClassesForCourse(courseInput.value, termSelect.value);
+    }
+  });
+}
 
 // 3. Track Button Click
-trackBtn.addEventListener('click', async () => {
-  const courseCode = courseInput.value.trim().toUpperCase();
-  const classId = classSelect.value || 'ALL';
-  const selectedOpt = classSelect.options[classSelect.selectedIndex];
-  const classLabel = selectedOpt ? selectedOpt.dataset.label || selectedOpt.textContent : 'All Classes';
-  const term = termSelect.value;
+if (trackBtn) {
+  trackBtn.addEventListener('click', async () => {
+    const courseCode = courseInput.value.trim().toUpperCase();
+    const classId = classSelect.value || 'ALL';
+    const selectedOpt = classSelect.options[classSelect.selectedIndex];
+    const classLabel = selectedOpt ? selectedOpt.dataset.label || selectedOpt.textContent : 'All Classes';
+    const term = termSelect.value;
 
-  // Validation
-  if (!courseCode || (validCourseCodes.size > 0 && !validCourseCodes.has(courseCode))) {
-    alert('Please enter a valid 8-character UNSW course code (e.g. COMP1511).');
-    return;
-  }
-
-  statusMsg.textContent = 'Requesting push permission...';
-
-  try {
-    const reg = await navigator.serviceWorker.register('/sw.js');
-    const perm = await Notification.requestPermission();
-    
-    if (perm !== 'granted') {
-      statusMsg.textContent = '❌ Push permission denied in browser settings.';
+    if (!courseCode || (validCourseCodes.size > 0 && !validCourseCodes.has(courseCode))) {
+      alert('Please enter a valid 8-character UNSW course code (e.g. COMP1511).');
       return;
     }
 
-    const { publicKey } = await fetch('/api/vapid-public-key').then(r => r.json());
+    if (statusMsg) statusMsg.textContent = 'Requesting push permission...';
 
-    currentSubscription = await reg.pushManager.subscribe({
-      userVisibleOnly: true,
-      applicationServerKey: publicKey
-    });
+    try {
+      const reg = await navigator.serviceWorker.register('/sw.js');
+      const perm = await Notification.requestPermission();
+      
+      if (perm !== 'granted') {
+        if (statusMsg) statusMsg.textContent = '❌ Push permission denied.';
+        return;
+      }
 
-    const res = await fetch('/api/track', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        courseCode,
-        classId,
-        classLabel,
-        term,
-        subscription: currentSubscription
-      })
-    });
+      const { publicKey } = await fetch('/api/vapid-public-key').then(r => r.json());
 
-    const data = await res.json();
-    if (data.success) {
-      statusMsg.textContent = data.message || `✅ Tracking ${courseCode}!`;
-      loadMyWatches();
+      currentSubscription = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: publicKey
+      });
+
+      const res = await fetch('/api/track', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          courseCode,
+          classId,
+          classLabel,
+          term,
+          subscription: currentSubscription
+        })
+      });
+
+      const data = await res.json();
+      if (data.success) {
+        if (statusMsg) statusMsg.textContent = data.message || `✅ Tracking ${courseCode}!`;
+        loadMyWatches();
+      }
+    } catch (err) {
+      if (statusMsg) statusMsg.textContent = `Error: ${err.message}`;
     }
-  } catch (err) {
-    statusMsg.textContent = `Error: ${err.message}`;
-  }
-});
+  });
+}
 
-// 4. Load Active Watches with Clean Sub-Class Display
+// 4. Load Active Watches & Overall Course Capacities (With Null Guards)
 async function loadMyWatches() {
+  if (!navigator.serviceWorker) return;
   const reg = await navigator.serviceWorker.getRegistration();
   if (!reg) return;
 
   const sub = await reg.pushManager.getSubscription();
   if (!sub) {
-    activeWatchesList.innerHTML = '<li class="muted-text">No active watches on this browser.</li>';
+    if (activeWatchesList) activeWatchesList.innerHTML = '<li class="muted-text">No active watches on this browser.</li>';
+    if (courseOverviewList) courseOverviewList.innerHTML = '<li class="muted-text">Track a course to view overall capacity.</li>';
     return;
   }
 
   currentSubscription = sub;
 
-  const res = await fetch('/api/my-watches', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ endpoint: sub.endpoint })
-  });
+  try {
+    const res = await fetch('/api/my-watches', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ endpoint: sub.endpoint })
+    });
 
-  const data = await res.json();
-  
-  if (!data || data.length === 0) {
-    activeWatchesList.innerHTML = '<li class="muted-text">No active watches.</li>';
-    return;
+    const { watches = [], courseCapacities = [] } = await res.json();
+
+    // A. Render Overall Course Capacities Card
+    if (courseOverviewList) {
+      if (courseCapacities.length === 0) {
+        courseOverviewList.innerHTML = '<li class="muted-text">No courses tracked yet.</li>';
+      } else {
+        courseOverviewList.innerHTML = courseCapacities.map(c => {
+          let badge = `<span class="capacity-pill syncing">⏳ Syncing...</span>`;
+          if (c.enrolled !== null && c.capacity !== null) {
+            const isOpen = c.enrolled < c.capacity;
+            badge = `<span class="capacity-pill ${isOpen ? 'open' : 'full'}">${c.enrolled} / ${c.capacity} (${isOpen ? 'Open' : 'Full'})</span>`;
+          }
+          return `
+            <li class="course-overview-item">
+              <div><b>${c.course_code}</b> <span class="badge">${c.term}</span></div>
+              <div>${badge}</div>
+            </li>
+          `;
+        }).join('');
+      }
+    }
+
+    // B. Render Individual Class Watch List
+    if (activeWatchesList) {
+      if (watches.length === 0) {
+        activeWatchesList.innerHTML = '<li class="muted-text">No active watches.</li>';
+        return;
+      }
+
+      activeWatchesList.innerHTML = watches.map(w => {
+        let capacityBadge = `<span class="capacity-pill syncing">⏳ Syncing...</span>`;
+        
+        if (w.enrolled !== null && w.capacity !== null) {
+          const isOpen = w.enrolled < w.capacity;
+          const badgeClass = isOpen ? 'open' : 'full';
+          capacityBadge = `<span class="capacity-pill ${badgeClass}">${w.enrolled} / ${w.capacity} (${isOpen ? 'Open' : 'Full'})</span>`;
+        }
+
+        let displayDetail = w.class_label;
+
+        if (w.watched_class_id === 'ALL' && w.actual_class_id) {
+          const timeSlot = w.day && w.time ? `[${w.day} ${w.time}]` : '';
+          const loc = w.location ? `📍 ${w.location}` : '';
+          displayDetail = `Class #${w.actual_class_id} [${w.component || 'Section'}] ${timeSlot} ${loc}`.trim();
+        }
+
+        return `
+          <li>
+            <div class="watch-info">
+              <div class="watch-header">
+                <b>${w.course_code}</b>
+                <span class="badge">${w.term}</span>
+              </div>
+              <div class="watch-details">${displayDetail}</div>
+              <div class="watch-capacity">${capacityBadge}</div>
+            </div>
+            <button class="delete-btn" onclick="removeWatch(${w.watch_id})">✕</button>
+          </li>
+        `;
+      }).join('');
+    }
+  } catch (err) {
+    console.error('Error refreshing watches:', err);
   }
-
-  activeWatchesList.innerHTML = data.map(w => {
-    let capacityBadge = `<span class="capacity-pill syncing">⏳ Syncing with myUNSW...</span>`;
-    
-    if (w.enrolled !== null && w.capacity !== null) {
-      const isOpen = w.enrolled < w.capacity;
-      const badgeClass = isOpen ? 'open' : 'full';
-      capacityBadge = `<span class="capacity-pill ${badgeClass}">${w.enrolled} / ${w.capacity} (${isOpen ? 'Open' : 'Full'})</span>`;
-    }
-
-    // Format display label cleanly whether single class or "ALL"
-    let displayTitle = `<b>${w.course_code}</b>`;
-    let displayDetail = w.class_label;
-
-    if (w.watched_class_id === 'ALL' && w.actual_class_id) {
-      displayDetail = `Class #${w.actual_class_id} [${w.component || 'Section'}]`;
-    }
-
-    return `
-      <li>
-        <div class="watch-info">
-          <div class="watch-header">
-            ${displayTitle}
-            <span class="badge">${w.term}</span>
-          </div>
-          <div class="watch-details">${displayDetail}</div>
-          <div class="watch-capacity">${capacityBadge}</div>
-        </div>
-        <button class="delete-btn" onclick="removeWatch(${w.watch_id})">✕</button>
-      </li>
-    `;
-  }).join('');
 }
 
 // 5. Remove Watch
@@ -259,6 +297,8 @@ window.removeWatch = async function(id) {
   loadMyWatches();
 };
 
-// Initial setup
+// Automatic 15-second background UI refresh
+setInterval(loadMyWatches, 15000);
+
 loadCourseCodes();
 loadMyWatches();

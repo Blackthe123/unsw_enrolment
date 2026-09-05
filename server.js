@@ -35,11 +35,23 @@ db.exec(`
     UNIQUE(endpoint, course_code, class_id, term)
   );
 
+  CREATE TABLE IF NOT EXISTS course_capacities (
+    course_code TEXT NOT NULL,
+    term TEXT NOT NULL,
+    enrolled INTEGER,
+    capacity INTEGER,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (course_code, term)
+  );
+
   CREATE TABLE IF NOT EXISTS class_capacities (
     course_code TEXT NOT NULL,
     class_id TEXT NOT NULL,
     term TEXT NOT NULL,
     component TEXT,
+    day TEXT,
+    time TEXT,
+    location TEXT,
     enrolled INTEGER,
     capacity INTEGER,
     status TEXT,
@@ -48,7 +60,7 @@ db.exec(`
   );
 `);
 
-// DB Prepared Queries
+// Prepared Statements
 const checkExistingAllWatch = db.prepare(`
   SELECT id FROM watches WHERE endpoint = ? AND course_code = ? AND term = ? AND class_id = 'ALL'
 `);
@@ -75,7 +87,6 @@ const getSubscribersForClass = db.prepare(`
   WHERE course_code = ? AND term = ? AND (class_id = 'ALL' OR class_id = ?)
 `);
 
-// in server.js
 const getWatchesWithCapacities = db.prepare(`
   SELECT 
     w.id AS watch_id, 
@@ -85,6 +96,9 @@ const getWatchesWithCapacities = db.prepare(`
     w.term,
     c.class_id AS actual_class_id,
     c.component,
+    c.day,
+    c.time,
+    c.location,
     c.enrolled,
     c.capacity,
     c.status
@@ -97,15 +111,45 @@ const getWatchesWithCapacities = db.prepare(`
   ORDER BY w.created_at DESC, c.class_id ASC
 `);
 
-const upsertCapacity = db.prepare(`
-  INSERT INTO class_capacities (course_code, class_id, term, component, enrolled, capacity, status, updated_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+const getCourseCapacitiesForEndpoint = db.prepare(`
+  SELECT DISTINCT 
+    w.course_code, 
+    w.term, 
+    cc.enrolled, 
+    cc.capacity, 
+    cc.updated_at
+  FROM watches w
+  LEFT JOIN course_capacities cc 
+    ON w.course_code = cc.course_code AND w.term = cc.term
+  WHERE w.endpoint = ?
+`);
+
+const upsertCourseCapacity = db.prepare(`
+  INSERT INTO course_capacities (course_code, term, enrolled, capacity, updated_at)
+  VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+  ON CONFLICT(course_code, term) DO UPDATE SET
+    enrolled = excluded.enrolled,
+    capacity = excluded.capacity,
+    updated_at = CURRENT_TIMESTAMP
+`);
+
+const upsertClassCapacity = db.prepare(`
+  INSERT INTO class_capacities (course_code, class_id, term, component, day, time, location, enrolled, capacity, status, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   ON CONFLICT(course_code, class_id, term) DO UPDATE SET
     component = excluded.component,
+    day = excluded.day,
+    time = excluded.time,
+    location = excluded.location,
     enrolled = excluded.enrolled,
     capacity = excluded.capacity,
     status = excluded.status,
     updated_at = CURRENT_TIMESTAMP
+`);
+
+const getPreviousClassState = db.prepare(`
+  SELECT enrolled, capacity, status FROM class_capacities 
+  WHERE course_code = ? AND class_id = ? AND term = ?
 `);
 
 // --- Express App Setup ---
@@ -117,25 +161,21 @@ app.get('/api/vapid-public-key', (req, res) => {
   res.json({ publicKey: PUBLIC_VAPID_KEY });
 });
 
-// Smart Track endpoint (Handles ALL vs Specific deduplication)
 app.post('/api/track', (req, res) => {
   const { courseCode, classId, classLabel, term, subscription } = req.body;
   const course = courseCode.toUpperCase().trim();
   const endpoint = subscription.endpoint;
 
   try {
-    // 1. If user is already tracking ALL for this course, reject specific class addition
     const hasAll = checkExistingAllWatch.get(endpoint, course, term);
     if (hasAll && classId !== 'ALL') {
       return res.json({ success: true, message: `Already tracking ALL classes for ${course}` });
     }
 
-    // 2. If user selects ALL, remove any individual classes they had previously added
     if (classId === 'ALL') {
       deleteSpecificWatches.run(endpoint, course, term);
     }
 
-    // 3. Insert the watch
     insertWatch.run(
       course,
       classId || 'ALL',
@@ -148,19 +188,19 @@ app.post('/api/track', (req, res) => {
     console.log(`📌 [Watch Added] ${course} (${classId}) for ${term}`);
     res.json({ success: true });
   } catch (err) {
-    console.error('Failed to save watch:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Fetch watches with live capacities for calling device
+// Fetch both specific watches and overall course summaries
 app.post('/api/my-watches', (req, res) => {
   const { endpoint } = req.body;
-  if (!endpoint) return res.json([]);
+  if (!endpoint) return res.json({ watches: [], courseCapacities: [] });
   
   try {
     const watches = getWatchesWithCapacities.all(endpoint);
-    res.json(watches);
+    const courseCapacities = getCourseCapacitiesForEndpoint.all(endpoint);
+    res.json({ watches, courseCapacities });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -176,11 +216,7 @@ app.post('/api/untrack', (req, res) => {
   }
 });
 
-const getPreviousClassState = db.prepare(`
-  SELECT enrolled, capacity, status FROM class_capacities 
-  WHERE course_code = ? AND class_id = ? AND term = ?
-`);
-
+// --- Playwright Polling Worker ---
 async function pollCourses() {
   const uniqueTargets = getUniqueCourses.all();
   if (uniqueTargets.length === 0) return;
@@ -211,7 +247,6 @@ async function pollCourses() {
         await page.goto('https://my.unsw.edu.au/active/studentClassEnrol/courses.xml');
       }
 
-      // 1. Switch to Term Tab
       const termTabButton = page.locator(`ul.nav-tabs a:has-text("${term}")`).first();
       if (await termTabButton.count() > 0) {
         await termTabButton.click();
@@ -238,24 +273,25 @@ async function pollCourses() {
 
       await page.waitForSelector('h3.un-page-title:has-text("Course Information")');
 
-      // 2. CHECK OVERALL COURSE CAPACITY FIRST (The Gatekeeper)
+      // 1. Parse & Save Overall Course Capacity (Ceiling)
       let isOverallCourseOpen = true;
       try {
         const overallCapElem = page.locator('dl dt:has-text("Enrols / Capacity") + dd').first();
-        const overallText = (await overallCapElem.innerText()).trim(); // e.g. "167 / 168"
+        const overallText = (await overallCapElem.innerText()).trim();
         const [cEnrolled, cMax] = overallText.split('/').map(n => parseInt(n.trim(), 10));
 
         console.log(`📊 Overall ${course} Capacity: ${cEnrolled} / ${cMax}`);
-        
+        upsertCourseCapacity.run(course, term, cEnrolled, cMax);
+
         if (cEnrolled >= cMax) {
           isOverallCourseOpen = false;
           console.log(`⛔ ${course} is FULL overall (${cEnrolled}/${cMax}). Class alerts suppressed.`);
         }
       } catch (err) {
-        console.warn('Could not parse overall course capacity, checking classes directly...');
+        console.warn('Could not parse overall course capacity');
       }
 
-      // 3. Parse Individual Class Rows
+      // 2. Parse & Save Rich Class Component Information
       const rows = page.locator('section.un-page-section table.table tbody tr');
       const count = await rows.count();
 
@@ -265,26 +301,24 @@ async function pollCourses() {
 
         const classNbr = (await cells.nth(0).innerText()).trim();
         const component = (await cells.nth(2).innerText()).trim();
-        const capacityText = (await cells.nth(9).innerText()).trim(); // "227 / 260"
-        const status = (await cells.nth(10).innerText()).trim();      // "Open" / "Closed"
+        const location = (await cells.nth(5).innerText()).trim();
+        const day = (await cells.nth(6).innerText()).trim();
+        const time = (await cells.nth(7).innerText()).trim();
+        const capacityText = (await cells.nth(9).innerText()).trim();
+        const status = (await cells.nth(10).innerText()).trim();
         const [enrolled, max] = capacityText.split('/').map(n => parseInt(n.trim(), 10));
 
-        // Check previous recorded state from DB to prevent spamming
         const prevState = getPreviousClassState.get(course, classNbr, term);
         const wasFullOrClosed = !prevState || prevState.enrolled >= prevState.capacity || prevState.status === 'Closed';
         const moreSpotsOpened = prevState && enrolled < prevState.enrolled;
 
-        // Save current numbers to database so the PWA UI is always up to date
-        upsertCapacity.run(course, classNbr, term, component, enrolled, max, status);
+        // Save detailed class metadata to DB
+        upsertClassCapacity.run(course, classNbr, term, component, day, time, location, enrolled, max, status);
 
-        // Send alert ONLY IF:
-        // 1. Overall course has spots (isOverallCourseOpen === true)
-        // 2. This specific class has spots (enrolled < max)
-        // 3. State changed (it was previously full, or more spots opened)
         const shouldNotify = isOverallCourseOpen && (enrolled < max) && (wasFullOrClosed || moreSpotsOpened);
 
         if (shouldNotify) {
-          console.log(`🎉 NEW SPOT OPEN: ${course} Class #${classNbr} [${component}] (${enrolled}/${max})`);
+          console.log(`🎉 SPOT OPEN: ${course} Class #${classNbr} [${component}] (${enrolled}/${max})`);
 
           const subscribers = getSubscribersForClass.all(course, term, classNbr);
 
@@ -293,17 +327,15 @@ async function pollCourses() {
             
             const payload = JSON.stringify({
               title: `Spot Available in ${course}!`,
-              body: `Class #${classNbr} [${component}] now has open seats (${enrolled}/${max}). Tap to enrol!`,
+              body: `Class #${classNbr} [${component}] (${day} ${time}) has seats open (${enrolled}/${max}). Tap to enrol!`,
               url: 'https://my.unsw.edu.au'
             });
 
-            webpush.sendNotification(pushSub, payload)
-              .then(() => console.log(`🚀 [Push Sent] Alerted subscriber for ${course} #${classNbr}`))
-              .catch(err => {
-                if (err.statusCode === 410 || err.statusCode === 404) {
-                  deleteWatch.run(sub.id, sub.endpoint);
-                }
-              });
+            webpush.sendNotification(pushSub, payload).catch(err => {
+              if (err.statusCode === 410 || err.statusCode === 404) {
+                deleteWatch.run(sub.id, sub.endpoint);
+              }
+            });
           }
         }
       }
