@@ -3,3 +3,5 @@ auth.json
 test.js
 .env
 watches.db
+ssh-priv-key.key
+ssh-pub-key.pub
