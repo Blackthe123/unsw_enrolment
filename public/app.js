@@ -45,80 +45,52 @@ async function loadCourseCodes() {
 async function loadClassesForCourse(courseCode, term) {
   courseCode = courseCode.trim().toUpperCase();
 
-  if (validCourseCodes.size > 0 && !validCourseCodes.has(courseCode)) {
-    if (courseValidationMsg) {
-      courseValidationMsg.textContent = '❌ Course code not found in UNSW catalog.';
-      courseValidationMsg.style.color = '#ef4444';
-    }
-    classSelect.innerHTML = '<option value="">Invalid course code</option>';
-    classSelect.disabled = true;
-    return;
-  } else if (courseValidationMsg) {
-    courseValidationMsg.textContent = '✅ Valid UNSW Course';
-    courseValidationMsg.style.color = '#10b981';
-  }
-
-  classSelect.innerHTML = '<option value="">⏳ Loading class times...</option>';
+  classSelect.innerHTML = '<option value="">⏳ Fetching classes from UNSW Timetable...</option>';
   classSelect.disabled = true;
 
-  const query = `
-    query GetClasses($coursePattern: String!, $term: String!) {
-      classes(where: { term: { _eq: $term }, course_id: { _ilike: $coursePattern } }) {
-        class_id
-        times {
-          day
-          time
-          location
-        }
-      }
-    }
-  `;
-
   try {
-    const res = await fetch(GRAPHQL_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        query,
-        variables: {
-          coursePattern: `%${courseCode}%`,
-          term: term
-        }
-      })
-    });
-
-    const { data } = await res.json();
-    const classes = data?.classes || [];
+    const res = await fetch(`/api/classes/${courseCode}/${term}`);
+    const classes = await res.json();
 
     classSelect.innerHTML = '<option value="ALL" data-label="All Classes">🌟 Track ALL Classes in this Course</option>';
 
-    if (classes.length > 0) {
+    if (classes && classes.length > 0) {
       classes.forEach(c => {
-        const classNbr = c.class_id.split('-').pop();
-        let label = `Class #${classNbr}`;
+        // 1. Shorten Activity names
+        const activity = (c.activity || 'Class')
+          .replace('Tutorial-Laboratory', 'Tut-Lab')
+          .replace('Tutorial', 'Tut')
+          .replace('Lecture', 'Lec')
+          .replace('Laboratory', 'Lab');
 
-        if (c.times && c.times.length > 0) {
-          const t = c.times[0];
-          const dayTime = t.day && t.time ? `[${t.day} ${t.time}]` : '';
-          const location = t.location ? `📍 ${t.location}` : '';
-          label = `Class #${classNbr} ${dayTime} ${location}`.trim();
-        } else {
-          label = `Class #${classNbr} (Online / TBA)`;
-        }
+        // 2. Clean Location: Strip redundant grid codes like "(K-E8-G05)" and "(ONLINE)"
+        let loc = (c.location || '')
+          .replace(/\(K-[A-Z0-9-]+\)/gi, '') // Removes grid codes
+          .replace(/\(ONLINE\)/gi, '')
+          .replace(/Science & Engineering/gi, 'Sci & Eng')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+        // 3. Compact times format
+        const times = c.times ? `[${c.times}]` : '';
+        const locFormatted = loc ? `📍 ${loc}` : '';
+
+        // Final clean, readable label that fits on screen
+        const label = `Class #${c.classNbr} [${activity} - ${c.section || ''}] ${times} ${locFormatted}`.replace(/\s+/g, ' ').trim();
 
         const opt = document.createElement('option');
-        opt.value = classNbr;
+        opt.value = c.classNbr;
         opt.dataset.label = label;
         opt.textContent = label;
         classSelect.appendChild(opt);
       });
       classSelect.disabled = false;
     } else {
-      classSelect.innerHTML = '<option value="ALL" data-label="All Classes">Track All Classes (No individual sections)</option>';
+      classSelect.innerHTML = '<option value="ALL" data-label="All Classes">Track All Classes (No individual sections found)</option>';
       classSelect.disabled = false;
     }
   } catch (err) {
-    console.error(err);
+    console.error('Failed to load classes from Timetable:', err);
     classSelect.innerHTML = '<option value="ALL" data-label="All Classes">Track All Classes</option>';
     classSelect.disabled = false;
   }
@@ -154,6 +126,35 @@ if (trackBtn) {
       return;
     }
 
+    // --- 1. PURE FEATURE DETECTION ---
+    const hasServiceWorker = 'serviceWorker' in navigator;
+    const hasNotification = 'Notification' in window;
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches || Boolean(navigator.standalone);
+
+    // Case A: Device/Browser has no Service Worker support at all
+    if (!hasServiceWorker) {
+      alert('❌ This browser does not support Web Push notifications.');
+      return;
+    }
+
+    // Case B: Notification API is missing because it's running inside a browser tab that requires PWA installation (e.g. iOS Safari)
+    if (!hasNotification) {
+      if (!isStandalone) {
+        alert(
+          "📱 Installation Required:\n\n" +
+          "Your browser requires this web app to be added to your Home Screen before notifications can be enabled:\n\n" +
+          "1. Tap Share (⎋)\n" +
+          "2. Tap 'Add to Home Screen'\n" +
+          "3. Open the app from your Home Screen to enable alerts!"
+        );
+      } else {
+        // Installed, but OS still lacks Notification API (e.g. iOS < 16.4)
+        alert('❌ Notifications are not supported on your operating system version. Please update your device.');
+      }
+      return;
+    }
+
+    // --- 2. PROCEED WITH PERMISSION & REGISTRATION ---
     if (statusMsg) statusMsg.textContent = 'Requesting push permission...';
 
     try {
@@ -161,7 +162,7 @@ if (trackBtn) {
       const perm = await Notification.requestPermission();
       
       if (perm !== 'granted') {
-        if (statusMsg) statusMsg.textContent = '❌ Push permission denied.';
+        if (statusMsg) statusMsg.textContent = '❌ Push permission denied in browser settings.';
         return;
       }
 
@@ -296,6 +297,31 @@ window.removeWatch = async function(id) {
 
   loadMyWatches();
 };
+
+// Function to fetch and render live community stats
+async function loadLiveStats() {
+  const statsElem = document.getElementById('statsCounter');
+  if (!statsElem) return;
+
+  try {
+    const res = await fetch('/api/stats');
+    const { totalUsers, uniqueCourses } = await res.json();
+
+    const courseWord = uniqueCourses === 1 ? 'course' : 'courses';
+    const studentWord = totalUsers === 1 ? 'student' : 'students';
+
+    statsElem.innerHTML = `⚡ Currently watching <b>${uniqueCourses} ${courseWord}</b> for <b>${totalUsers} ${studentWord}</b>`;
+  } catch (err) {
+    console.error('Failed to load stats:', err);
+  }
+}
+
+// Call on startup
+loadLiveStats();
+
+// Auto-refresh stats along with your regular UI refresh
+setInterval(loadLiveStats, 30000);
+
 
 // Automatic 15-second background UI refresh
 setInterval(loadMyWatches, 15000);
