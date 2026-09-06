@@ -4,6 +4,8 @@ import webpush from 'web-push';
 import { chromium } from 'playwright';
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
+import axios from 'axios';
+import * as cheerio from 'cheerio';
 
 const { 
   VAPID_MAILTO, 
@@ -21,6 +23,30 @@ webpush.setVapidDetails(VAPID_MAILTO, PUBLIC_VAPID_KEY, PRIVATE_VAPID_KEY);
 
 // --- SQLite Database Setup ---
 const db = new Database('watches.db');
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS timetable_cache (
+    course_code TEXT NOT NULL,
+    term TEXT NOT NULL,
+    classes_json TEXT NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (course_code, term)
+  )
+`);
+
+const getCachedClasses = db.prepare(`
+  SELECT classes_json, updated_at FROM timetable_cache 
+  WHERE course_code = ? AND term = ? 
+  AND updated_at > datetime('now', '-24 hours')
+`);
+
+const saveCachedClasses = db.prepare(`
+  INSERT INTO timetable_cache (course_code, term, classes_json, updated_at)
+  VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+  ON CONFLICT(course_code, term) DO UPDATE SET
+    classes_json = excluded.classes_json,
+    updated_at = CURRENT_TIMESTAMP
+`);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS watches (
@@ -152,6 +178,14 @@ const getPreviousClassState = db.prepare(`
   WHERE course_code = ? AND class_id = ? AND term = ?
 `);
 
+const getStats = db.prepare(`
+  SELECT 
+    COUNT(DISTINCT endpoint) AS total_users,
+    COUNT(DISTINCT course_code) AS unique_courses,
+    COUNT(*) AS total_watches
+  FROM watches
+`);
+
 // --- Express App Setup ---
 const app = express();
 app.use(express.json());
@@ -160,6 +194,20 @@ app.use(express.static('public'));
 app.get('/api/vapid-public-key', (req, res) => {
   res.json({ publicKey: PUBLIC_VAPID_KEY });
 });
+
+app.get('/api/stats', (req, res) => {
+  try {
+    const stats = getStats.get();
+    res.json({
+      totalUsers: stats.total_users || 0,
+      uniqueCourses: stats.unique_courses || 0,
+      totalWatches: stats.total_watches || 0
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 app.post('/api/track', (req, res) => {
   const { courseCode, classId, classLabel, term, subscription } = req.body;
@@ -216,6 +264,111 @@ app.post('/api/untrack', (req, res) => {
   }
 });
 
+// API Route for Frontend to fetch classes
+app.get('/api/classes/:course/:term', async (req, res) => {
+  const { course, term } = req.params;
+  const courseUpper = course.toUpperCase().trim();
+
+  // Check 24-hour cache first (Response in <2ms!)
+  const cached = getCachedClasses.get(courseUpper, term);
+  if (cached) {
+    return res.json(JSON.parse(cached.classes_json));
+  }
+
+  // Scrape if not in cache
+  const classes = await scrapeUNSWTimetable(courseUpper, term);
+  if (classes.length > 0) {
+    saveCachedClasses.run(courseUpper, term, JSON.stringify(classes));
+  }
+  res.json(classes);
+});
+
+// Discord Alert
+async function sendAdminAlert(message) {
+  if (!process.env.DISCORD_ADMIN_WEBHOOK) return;
+  try {
+    await fetch(process.env.DISCORD_ADMIN_WEBHOOK, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: message })
+    });
+  } catch (err) {
+    console.error('Failed to send admin webhook:', err.message);
+  }
+}
+
+// UNSW Public Timetable Scraper
+async function scrapeUNSWTimetable(courseCode, term) {
+  try {
+    const url = `https://timetable.unsw.edu.au/current/${courseCode.toUpperCase()}.html`;
+    const { data: html } = await axios.get(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      timeout: 8000
+    });
+
+    const $ = cheerio.load(html);
+    const classes = [];
+
+    // Loop through each class detail card
+    $('td.formBody td.formBody').each((_, box) => {
+      const $box = $(box);
+      const firstLabel = $box.find('td.label').first().text().trim();
+
+      if (firstLabel === 'Class Nbr') {
+        const dataMap = {};
+        const labels = $box.find('td.label').map((_, el) => $(el).text().replace(/\u00a0/g, '').trim()).get();
+        const values = $box.find('td.data').map((_, el) => $(el).text().replace(/\u00a0/g, '').trim()).get();
+
+        labels.forEach((label, i) => {
+          dataMap[label] = values[i] || '';
+        });
+
+        const teachingPeriod = dataMap['Teaching Period'] || '';
+
+        // Filter for requested term (e.g. "T3")
+        if (!term || teachingPeriod.toUpperCase().includes(term.toUpperCase())) {
+          
+          // --- Extract Meeting Information (RowHighlight / RowLowlight) ---
+          const meetingTimes = [];
+          const meetingLocations = [];
+
+          $box.find('tr.rowHighlight, tr.rowLowlight').each((_, mRow) => {
+            const cells = $(mRow).find('td.data');
+            if (cells.length >= 3) {
+              const day = cells.eq(0).text().trim();
+              const time = cells.eq(1).text().trim();
+              const loc = cells.eq(2).text().trim();
+
+              if (day && time) {
+                meetingTimes.push(`${day} ${time}`);
+              }
+              if (loc && loc !== '-' && !meetingLocations.includes(loc)) {
+                meetingLocations.push(loc);
+              }
+            }
+          });
+
+          classes.push({
+            classNbr: dataMap['Class Nbr'],
+            section: dataMap['Section'],
+            activity: dataMap['Activity'], // e.g. "Lecture", "Tutorial-Laboratory"
+            mode: dataMap['Mode of Delivery'] || '',
+            teachingPeriod: teachingPeriod,
+            times: meetingTimes.join(', '),        // e.g. "Mon 11:00 - 13:00, Tue 16:00 - 18:00"
+            location: meetingLocations.join(' & ') // e.g. "Science & Engineering G05 (K-E8-G05)"
+          });
+        }
+      }
+    });
+
+    return classes;
+  } catch (err) {
+    console.error(`Timetable scrape error for ${courseCode}:`, err.message);
+    return [];
+  }
+}
+
+
 // --- Playwright Polling Worker ---
 async function pollCourses() {
   const uniqueTargets = getUniqueCourses.all();
@@ -226,9 +379,25 @@ async function pollCourses() {
     return;
   }
 
+  if (page.url().includes('login.microsoftonline.com') || page.url().includes('/login')) {
+    console.error('🚨 [AUTH EXPIRED] Your session in auth.json has expired!');
+    sendAdminAlert('🚨 **UNSW Tracker Alert:** myUNSW session in `auth.json` has expired! Please log in to refresh.');
+    return;
+  }
+
+
   console.log(`\n🔍 Checking ${uniqueTargets.length} unique course(s) on myUNSW...`);
 
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath: '/usr/bin/chromium-browser',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu'
+    ]
+  });
   const context = await browser.newContext({ storageState: 'auth.json' });
   const page = await context.newPage();
 
