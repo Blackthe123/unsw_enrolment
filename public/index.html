@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>UNSW Class Sniper</title>
+  <title>UNSW Course Watcher</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎯</text></svg>">
   <link rel="manifest" href="/manifest.json">
   <link rel="stylesheet" href="/style.css">
 </head>
@@ -12,7 +13,7 @@
     <!-- Main Tracker Column -->
     <div class="main-content">
       <header>
-        <h1>🎯 UNSW Class Tracker</h1>
+        <h1>UNSW Course Watcher</h1>
         <p>Real-time push alerts when spots open in myUNSW</p>
       </header>
 
@@ -78,8 +79,19 @@
           <li>Select <b>"Add to Home Screen"</b>.</li>
           <li>Open the installed app and hit <b>Track</b> to enable push.</li>
         </ol>
+
+        <hr class="divider">
+        <h4>⚠️ Site Data Warning</h4>
+        <p class="helper-text" style="color: var(--muted); font-size: 0.8rem;">
+          Clearing "Cookies and Site Data" in your browser settings will reset your push token and remove your active watches.
+        </p>
       </div>
     </aside>
+    <footer class="app-footer">
+      <div id="statsCounter" class="stats-badge">
+        ⚡ Loading community stats...
+      </div>
+    </footer>
   </div>
 
   <script src="/app.js"></script>
