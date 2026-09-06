@@ -26,6 +26,30 @@ body {
   max-width: 920px;
 }
 
+.app-footer {
+  grid-column: 1 / -1;
+  text-align: center;
+  margin-top: 8px;
+  padding: 12px 0 24px 0;
+}
+
+.stats-badge {
+  display: inline-block;
+  font-size: 0.85rem;
+  color: var(--muted);
+  background: rgba(21, 28, 44, 0.8);
+  border: 1px solid #243049;
+  padding: 8px 18px;
+  border-radius: 9999px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  letter-spacing: 0.01em;
+}
+
+.stats-badge b {
+  color: var(--primary);
+  font-weight: 600;
+}
+
 @media (min-width: 768px) {
   .layout { grid-template-columns: 1.2fr 0.8fr; }
 }
@@ -67,6 +91,7 @@ header p { color: var(--muted); font-size: 0.9rem; margin: 0; }
 label { display: block; font-size: 0.875rem; color: var(--muted); margin-bottom: 6px; font-weight: 500; }
 input, select {
   width: 100%;
+  max-width: 100%;
   padding: 12px 14px;
   background: #0b0f19;
   border: 1px solid #334155;
@@ -74,8 +99,23 @@ input, select {
   border-radius: 8px;
   font-size: 1rem;
   box-sizing: border-box;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
 }
-input:focus, select:focus { outline: 2px solid var(--primary); }
+
+input:focus, select:focus { 
+  outline: 2px solid var(--primary); 
+}
+
+/* Constrains the dropdown popup options on desktop */
+select option {
+  font-size: 0.875rem;
+  padding: 8px;
+  background: #0b0f19;
+  color: var(--text);
+}
+
 
 .helper-text { font-size: 0.75rem; margin-top: 4px; display: block; }
 
